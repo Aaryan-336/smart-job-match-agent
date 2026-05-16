@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import re
+import asyncio
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -211,6 +212,24 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _get_job_embeddings() -> np.ndarray:
     global _job_embeddings_cache
     if _job_embeddings_cache is None:
+        # Try loading pre-calculated embeddings from disk
+        possible_paths = [
+            Path(__file__).resolve().parent.parent / "job_embeddings.json",
+            Path(__file__).resolve().parent / "job_embeddings.json",
+            Path("job_embeddings.json"),
+        ]
+        for path in possible_paths:
+            if path.exists():
+                try:
+                    with open(path, "r") as f:
+                        data = json.load(f)
+                        _job_embeddings_cache = np.array(data)
+                        print(f"[Init] Loaded job embeddings from {path}")
+                        return _job_embeddings_cache
+                except Exception as e:
+                    print(f"[Init] Failed to load embeddings from {path}: {e}")
+
+        # Fallback to API if file not found
         job_texts = [_build_job_text(job) for job in JOBS]
         _job_embeddings_cache = _get_embeddings(job_texts)
     return _job_embeddings_cache
@@ -264,31 +283,27 @@ def _execute_parse_resume(resume_text: str) -> dict:
 
 
 def _execute_explain_matches(candidate: dict, top_jobs: list[dict]) -> dict:
-    system = "You are a career advisor AI. Analyze job-candidate matches."
+    system = "You are a career advisor AI. Be concise and professional."
     prompt = (
         f"Candidate: {json.dumps(candidate)}\n"
         f"Jobs: {json.dumps(top_jobs)}\n"
-        "Explain matches (1-2 sentences each), one clarifying question, "
-        "and a detailed Interview Readiness Analysis for each job. "
-        "For each analysis, include: 'match_level' (Strong Match if score>=80, Moderate Match if 60-79, Stretch Role if <60), "
-        "'interview_readiness_score' (0-100 based on skills, experience, and similarity), "
-        "'skill_gaps' (list of specific missing skills), "
-        "'suggested_preparation' (list of 2-3 specific topics to study for this job's interview). "
-        "Return JSON with 'explanations' ([{job_id, explanation, match_level, interview_readiness_score, skill_gaps, suggested_preparation}]) "
-        "and 'clarifying_question'."
+        "Analyze matches and return ONLY JSON with: 'explanations' (array of {job_id, explanation (1-2 sentences), "
+        "match_level (Strong/Moderate/Stretch), interview_readiness_score (0-100), skill_gaps (list), "
+        "suggested_preparation (list of 2 items)}) and 'clarifying_question'."
     )
     return _generate_json(prompt, system)
 
 
 # ── Agentic Flow ────────────────────────────────────────────────────────────
 
-def run_agent(resume_text: str) -> dict:
-    # 1. Parse
-    candidate = _execute_parse_resume(resume_text)
+async def run_agent(resume_text: str) -> dict:
+    # 1 & 2. Parse and Rank in parallel
+    loop = asyncio.get_event_loop()
+    parse_task = loop.run_in_executor(None, _execute_parse_resume, resume_text)
+    rank_task = loop.run_in_executor(None, rank_jobs, resume_text, 5)
     
-    # 2. Rank
-    time.sleep(1)  # Throttle
-    ranked = rank_jobs(resume_text, top_k=5)
+    candidate, ranked = await asyncio.gather(parse_task, rank_task)
+    
     top_jobs_for_llm = [
         {
             "id": job["id"],
@@ -301,8 +316,7 @@ def run_agent(resume_text: str) -> dict:
     ]
 
     # 3. Explain
-    time.sleep(1)  # Throttle
-    explanations_result = _execute_explain_matches(candidate, top_jobs_for_llm)
+    explanations_result = await loop.run_in_executor(None, _execute_explain_matches, candidate, top_jobs_for_llm)
 
     # 4. Build response
     explanation_map = {e["job_id"]: e for e in explanations_result.get("explanations", [])}
@@ -355,29 +369,28 @@ def health():
 
 
 @app.post("/recommend", response_model=RecommendResponse)
-def recommend(request: RecommendRequest):
+async def recommend(request: RecommendRequest):
     try:
-        result = run_agent(request.resume_text)
+        result = await run_agent(request.resume_text)
         return RecommendResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/refine", response_model=RefineResponse)
-def refine(request: RefineRequest):
+async def refine(request: RefineRequest):
     try:
         enriched_resume = f"{request.resume_text}\nQ: {request.clarifying_question}\nA: {request.candidate_answer}"
         
-        time.sleep(0.5)
-        ranked = rank_jobs(enriched_resume, top_k=5)
+        loop = asyncio.get_event_loop()
+        rank_task = loop.run_in_executor(None, rank_jobs, enriched_resume, 5)
+        parse_task = loop.run_in_executor(None, _execute_parse_resume, enriched_resume)
         
-        time.sleep(0.5)
-        candidate = _execute_parse_resume(enriched_resume)
+        ranked, candidate = await asyncio.gather(rank_task, parse_task)
         
         top_jobs_for_llm = [{"id": j["id"], "title": j["title"], "similarity_score": s} for j, s in ranked]
         
-        time.sleep(0.5)
-        explanations_result = _execute_explain_matches(candidate, top_jobs_for_llm)
+        explanations_result = await loop.run_in_executor(None, _execute_explain_matches, candidate, top_jobs_for_llm)
         explanation_map = {e["job_id"]: e for e in explanations_result.get("explanations", [])}
 
         ranked_jobs = []
@@ -396,12 +409,13 @@ def refine(request: RefineRequest):
                 )
             )
 
-        time.sleep(0.5)
-        reasoning = _generate_json(
-            f"Explain how answer '{request.candidate_answer}' changed recommendations for {request.resume_text[:200]}...",
+        reasoning_result = await loop.run_in_executor(
+            None, 
+            _generate_json,
+            f"Explain how answer '{request.candidate_answer}' changed recommendations for {request.resume_text[:100]}...",
             "You are a career advisor. Return JSON with 'reasoning' (string)."
         )
 
-        return RefineResponse(ranked_jobs=ranked_jobs, reasoning=reasoning.get("reasoning", "Updated based on feedback."))
+        return RefineResponse(ranked_jobs=ranked_jobs, reasoning=reasoning_result.get("reasoning", "Updated based on feedback."))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
