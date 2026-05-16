@@ -159,6 +159,13 @@ def _call_gemini_with_retry(func, *args, **kwargs):
                         except ValueError:
                             pass
                     
+                    # Limit wait time for Vercel (10s total timeout on free tier)
+                    if wait_time > 5.0:
+                        raise HTTPException(
+                            status_code=429, 
+                            detail=f"Rate limited. Please try again in {int(wait_time)}s."
+                        )
+                    
                     print(f"[Gemini] Rate limited. Retrying in {wait_time:.2f}s... (Attempt {i+1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
@@ -234,6 +241,22 @@ def _get_job_embeddings() -> np.ndarray:
     return _job_embeddings_cache
 
 
+def _parse_experience(val) -> float:
+    """Robustly parse experience strings like '5+' or '2-3 years' into a float."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    if not val:
+        return 0.0
+    try:
+        # Extract the first number found in the string
+        match = re.search(r"([\d\.]+)", str(val))
+        if match:
+            return float(match.group(1))
+    except Exception:
+        pass
+    return 0.0
+
+
 def rank_jobs(resume_text: str, top_k: int = 5) -> list[tuple[dict, float]]:
     resume_embedding = _get_embeddings([resume_text])[0]
     job_embeddings = _get_job_embeddings()
@@ -307,10 +330,12 @@ async def run_agent(resume_text: str) -> dict:
     ranked_jobs = []
     for job, score in ranked:
         analysis = explanation_map.get(job["id"], {})
+        # Ensure experience is a float for RankedJob
+        exp = _parse_experience(job.get("experience_years", 0))
         ranked_jobs.append(
             RankedJob(
-                **job,
-                required_experience_years=job.get("experience_years", 0),
+                **{**job, "experience_years": exp}, # Spread and override
+                required_experience_years=int(exp),
                 similarity_score=score,
                 explanation=analysis.get("explanation", "Strong profile match."),
                 match_level=analysis.get("match_level", "Moderate Match"),
@@ -320,6 +345,9 @@ async def run_agent(resume_text: str) -> dict:
             )
         )
 
+    # Robust candidate parsing
+    candidate["experience_years"] = _parse_experience(candidate.get("experience_years", 0))
+    
     return {
         "candidate": Candidate(**candidate),
         "ranked_jobs": ranked_jobs,
@@ -377,10 +405,11 @@ async def refine(request: RefineRequest):
         ranked_jobs = []
         for j, s in ranked:
             analysis = explanation_map.get(j["id"], {})
+            exp = _parse_experience(j.get("experience_years", 0))
             ranked_jobs.append(
                 RankedJob(
-                    **j,
-                    required_experience_years=j.get("experience_years", 0),
+                    **{**j, "experience_years": exp},
+                    required_experience_years=int(exp),
                     similarity_score=s,
                     explanation=analysis.get("explanation", "Matched."),
                     match_level=analysis.get("match_level", "Moderate Match"),
