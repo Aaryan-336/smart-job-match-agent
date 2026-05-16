@@ -134,42 +134,39 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
+class RateLimitError(Exception):
+    """Custom exception for rate limits to trigger fallback logic."""
+    pass
+
+
 def _call_gemini_with_retry(func, *args, **kwargs):
     """
     Helper to call Gemini API with retries for 429 Resource Exhausted errors.
-    Parses 'retry in X seconds' from the error message.
+    If limit is too high, raises RateLimitError to trigger deterministic fallback.
     """
-    max_retries = 5  # Increased retries
+    max_retries = 2  # Reduced for Vercel
     for i in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             err_str = str(e).lower()
-            # Check for 429 or Resource Exhausted
-            if "429" in err_str or "resource_exhausted" in err_str:
+            if "429" in err_str or "resource_exhausted" in err_str or "quota" in err_str:
                 if i < max_retries - 1:
-                    # Default backoff: 5, 10, 15, 20...
-                    wait_time = (i + 1) * 10 
-                    
-                    # Try to extract precise wait time from error message
+                    wait_time = 2.0  # Constant short wait for Vercel
                     match = re.search(r"retry in ([\d\.]+)", err_str)
                     if match:
                         try:
-                            wait_time = float(match.group(1)) + 2.0  # Add 2s buffer
-                        except ValueError:
-                            pass
+                            wait_time = min(float(match.group(1)), 3.0) # Max 3s wait
+                        except ValueError: pass
                     
-                    # Limit wait time for Vercel (10s total timeout on free tier)
-                    if wait_time > 5.0:
-                        raise HTTPException(
-                            status_code=429, 
-                            detail=f"Rate limited. Please try again in {int(wait_time)}s."
-                        )
+                    if wait_time > 3.0: # If provider asks for too much time
+                        raise RateLimitError(f"Rate limited by provider. Using fallback.")
                     
-                    print(f"[Gemini] Rate limited. Retrying in {wait_time:.2f}s... (Attempt {i+1}/{max_retries})")
+                    print(f"[Gemini] Rate limited. Retrying in {wait_time:.1f}s... (Attempt {i+1})")
                     time.sleep(wait_time)
                     continue
-            # Re-raise if not 429 or all retries failed
+                else:
+                    raise RateLimitError("Rate limit exceeded after retries.")
             raise e
 
 
@@ -256,9 +253,19 @@ def _parse_experience(val) -> float:
         pass
     return 0.0
 
+def _get_fallback_embeddings(texts: list[str]) -> np.ndarray:
+    """Mock embeddings for critical fallback when provider is down."""
+    print("[Embed] Provider rate limited. Using zero-vector fallback for ranking.")
+    return np.zeros((len(texts), 768)) # Common embedding dimension
+
 
 def rank_jobs(resume_text: str, top_k: int = 5) -> list[tuple[dict, float]]:
-    resume_embedding = _get_embeddings([resume_text])[0]
+    try:
+        resume_embedding = _get_embeddings([resume_text])[0]
+    except RateLimitError:
+        # If even embedding fails, we just take the first K jobs (degraded mode)
+        return [(JOBS[i], 0.5) for i in range(min(top_k, len(JOBS)))]
+    
     job_embeddings = _get_job_embeddings()
     scores = _cosine_similarity(resume_embedding, job_embeddings)
     top_indices = np.argsort(scores)[::-1][:top_k]
@@ -306,7 +313,81 @@ def _execute_parse_and_explain(resume_text: str, top_jobs: list[dict]) -> dict:
         "3. 'clarifying_question': (one brief question)\n"
         "4. 'reasoning': (briefly explain why these were picked if relevant)"
     )
-    return _generate_json(prompt, system)
+    try:
+        return _generate_json(prompt, system)
+    except RateLimitError:
+        print("[Agent] LLM Rate limit hit. Using deterministic fallback.")
+        return _fallback_analysis(resume_text, top_jobs)
+    except Exception as e:
+        print(f"[Agent] LLM call failed ({type(e).__name__}). Using fallback.")
+        return _fallback_analysis(resume_text, top_jobs)
+
+
+def _fallback_analysis(resume_text: str, top_jobs: list[dict]) -> dict:
+    """Deterministic fallback logic when LLM is unavailable."""
+    # 1. Simple Resume Parsing (Regex)
+    name_match = re.search(r"^([A-Z][a-z]+ [A-Z][a-z]+)", resume_text)
+    name = name_match.group(1) if name_match else "Candidate"
+    
+    # Extract years (e.g. "5+ years" or "2 years")
+    years_match = re.search(r"(\d+)\+?\s*years?", resume_text, re.I)
+    exp_years = float(years_match.group(1)) if years_match else 2.0
+    
+    # Skill extraction (Look for common tech keywords)
+    common_tech = {"python", "javascript", "react", "fastapi", "docker", "aws", "sql", "java", "node", "typescript", "nlp", "llm"}
+    found_skills = [s for s in common_tech if s in resume_text.lower()]
+    if not found_skills: found_skills = ["Software Development", "Problem Solving"]
+
+    candidate = {
+        "name": name,
+        "skills": found_skills,
+        "experience_years": exp_years,
+        "preferred_roles": ["Software Engineer"],
+        "education": "Degree in Computer Science or related field"
+    }
+
+    # 2. Match Explanations
+    explanations = []
+    for job in top_jobs:
+        job_skills = {s.lower() for s in job.get("skills", [])}
+        cand_skills = {s.lower() for s in found_skills}
+        overlap = job_skills.intersection(cand_skills)
+        gaps = job_skills - cand_skills
+        
+        overlap_ratio = len(overlap) / len(job_skills) if job_skills else 0.5
+        exp_req = _parse_experience(job.get("experience_years", 0))
+        exp_match = exp_years >= exp_req
+        
+        # Deterministic Score (0-100)
+        score = int((overlap_ratio * 70) + (10 if exp_match else 0) + 20)
+        score = min(95, max(40, score))
+        
+        level = "Strong Match" if score >= 80 else "Moderate Match" if score >= 60 else "Stretch Role"
+        
+        explanations.append({
+            "job_id": job["id"],
+            "explanation": f"Matches {len(overlap)} key skills. {level} based on profile overlap.",
+            "match_level": level,
+            "interview_readiness_score": score,
+            "skill_gaps": list(gaps)[:3] if gaps else ["No major gaps"],
+            "suggested_preparation": [f"Review {s} fundamentals" for s in list(gaps)[:2]] or ["Review system design"]
+        })
+
+    # 3. Dynamic Fallback Question
+    remote_jobs = [j for j in top_jobs if j.get("remote")]
+    if len(remote_jobs) > len(top_jobs) / 2:
+        question = "Since many matches are remote, do you have a strong preference for remote work?"
+    elif "ai" in resume_text.lower() or "llm" in resume_text.lower():
+        question = "Are you specifically looking for roles involving Generative AI or NLP?"
+    else:
+        question = "What are your top 3 priorities in your next role (e.g., tech stack, culture, salary)?"
+
+    return {
+        "candidate": candidate,
+        "explanations": explanations,
+        "clarifying_question": question,
+        "reasoning": "Determined using skill-overlap and experience matching logic (Fallback mode)."
+    }
 
 
 # ── Agentic Flow ────────────────────────────────────────────────────────────

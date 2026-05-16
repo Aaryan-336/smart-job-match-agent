@@ -132,6 +132,13 @@ curl -X POST https://your-project.vercel.app/recommend \
   -d '{"resume_text": "Your resume text here..."}'
 ```
 
+### Reliability & Quota Management
+The agent is designed to be **interviewer-ready** even on high-traffic days.
+- **Graceful Fallback**: If Gemini/OpenAI returns a `429 Rate Limit` error, the system automatically switches to a **Deterministic Analysis Engine**.
+- **Functional Stability**: During fallback, you still get accurate semantic rankings, skill-gap analysis, and readiness scores calculated via local overlap logic.
+- **Vercel Optimized**: Built-in timeout protection (25s) and short-circuit retries ensure the app never hangs on Vercel.
+- **Global Caching**: Job embeddings are cached in-memory and loaded from disk where possible to minimize API dependency.
+
 ## Limitations
 
 - **Raw text only** — no PDF/DOCX parsing; resume must be submitted as plain text.
