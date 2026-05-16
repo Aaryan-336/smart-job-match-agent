@@ -1,5 +1,7 @@
 # 🎯 Smart Job Match Agent
 
+**Live Demo:** [https://smart-job-match-agent.vercel.app](https://smart-job-match-agent.vercel.app)
+
 An AI-powered job recommendation API that uses **semantic search** (OpenAI embeddings + cosine similarity) and an **LLM agentic layer** (GPT-4o-mini with real tool/function calling) to match candidates with the best jobs from a curated dataset.
 
 ## Key Features
