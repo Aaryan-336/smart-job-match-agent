@@ -101,8 +101,8 @@ class RefineResponse(BaseModel):
 def load_jobs() -> list[dict]:
     """Load jobs from job_dataset.json, trying multiple paths for Vercel compatibility."""
     possible_paths = [
-        Path(__file__).resolve().parent.parent / "job_dataset.json",  # local dev
-        Path(__file__).resolve().parent / "job_dataset.json",         # fallback
+        Path(__file__).resolve().parent / "job_dataset.json",         # api/ folder (preferred)
+        Path(__file__).resolve().parent.parent / "job_dataset.json",  # root
         Path("job_dataset.json"),                                     # cwd
     ]
     for path in possible_paths:
@@ -214,8 +214,8 @@ def _get_job_embeddings() -> np.ndarray:
     if _job_embeddings_cache is None:
         # Try loading pre-calculated embeddings from disk
         possible_paths = [
-            Path(__file__).resolve().parent.parent / "job_embeddings.json",
             Path(__file__).resolve().parent / "job_embeddings.json",
+            Path(__file__).resolve().parent.parent / "job_embeddings.json",
             Path("job_embeddings.json"),
         ]
         for path in possible_paths:
@@ -283,13 +283,13 @@ def _execute_parse_resume(resume_text: str) -> dict:
 
 
 def _execute_explain_matches(candidate: dict, top_jobs: list[dict]) -> dict:
-    system = "You are a career advisor AI. Be concise and professional."
+    system = "You are a career advisor AI. Be very concise."
     prompt = (
         f"Candidate: {json.dumps(candidate)}\n"
         f"Jobs: {json.dumps(top_jobs)}\n"
-        "Analyze matches and return ONLY JSON with: 'explanations' (array of {job_id, explanation (1-2 sentences), "
-        "match_level (Strong/Moderate/Stretch), interview_readiness_score (0-100), skill_gaps (list), "
-        "suggested_preparation (list of 2 items)}) and 'clarifying_question'."
+        "Return ONLY JSON with: 'explanations' (list of {job_id, explanation (max 20 words), "
+        "match_level, interview_readiness_score, skill_gaps, suggested_preparation (max 2)}) "
+        "and 'clarifying_question'."
     )
     return _generate_json(prompt, system)
 
@@ -300,7 +300,7 @@ async def run_agent(resume_text: str) -> dict:
     # 1 & 2. Parse and Rank in parallel
     loop = asyncio.get_event_loop()
     parse_task = loop.run_in_executor(None, _execute_parse_resume, resume_text)
-    rank_task = loop.run_in_executor(None, rank_jobs, resume_text, 5)
+    rank_task = loop.run_in_executor(None, rank_jobs, resume_text, 3)
     
     candidate, ranked = await asyncio.gather(parse_task, rank_task)
     
@@ -383,7 +383,7 @@ async def refine(request: RefineRequest):
         enriched_resume = f"{request.resume_text}\nQ: {request.clarifying_question}\nA: {request.candidate_answer}"
         
         loop = asyncio.get_event_loop()
-        rank_task = loop.run_in_executor(None, rank_jobs, enriched_resume, 5)
+        rank_task = loop.run_in_executor(None, rank_jobs, enriched_resume, 3)
         parse_task = loop.run_in_executor(None, _execute_parse_resume, enriched_resume)
         
         ranked, candidate = await asyncio.gather(rank_task, parse_task)
