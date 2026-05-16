@@ -272,23 +272,16 @@ def _generate_json(prompt: str, system_instruction: str = "") -> dict:
         return json.loads(response.choices[0].message.content)
 
 
-def _execute_parse_resume(resume_text: str) -> dict:
-    system = (
-        "You are a resume parser. Extract structured information. "
-        "Return ONLY valid JSON with: name, skills (array), experience_years (number), "
-        "preferred_roles (array), education (string)."
-    )
-    return _generate_json(resume_text, system)
-
-
-def _execute_explain_matches(candidate: dict, top_jobs: list[dict]) -> dict:
-    system = "You are a career advisor AI. Be very concise."
+def _execute_parse_and_explain(resume_text: str, top_jobs: list[dict]) -> dict:
+    system = "You are a recruitment assistant. Parse the resume AND analyze job matches concisely."
     prompt = (
-        f"Candidate: {json.dumps(candidate)}\n"
-        f"Jobs: {json.dumps(top_jobs)}\n"
-        "Return ONLY JSON with: 'explanations' (list of {job_id, explanation (max 20 words), "
-        "match_level, interview_readiness_score, skill_gaps, suggested_preparation (max 2)}) "
-        "and 'clarifying_question'."
+        f"Resume: {resume_text}\n"
+        f"Top Jobs: {json.dumps(top_jobs)}\n"
+        "Return ONLY JSON with:\n"
+        "1. 'candidate': {name, skills, experience_years, preferred_roles, education}\n"
+        "2. 'explanations': list of {job_id, explanation (max 15 words), match_level, interview_readiness_score, skill_gaps, suggested_preparation}\n"
+        "3. 'clarifying_question': (one brief question)\n"
+        "4. 'reasoning': (briefly explain why these were picked if relevant)"
     )
     return _generate_json(prompt, system)
 
@@ -296,29 +289,20 @@ def _execute_explain_matches(candidate: dict, top_jobs: list[dict]) -> dict:
 # ── Agentic Flow ────────────────────────────────────────────────────────────
 
 async def run_agent(resume_text: str) -> dict:
-    # 1 & 2. Parse and Rank in parallel
+    # 1. Rank jobs first (Fast)
     loop = asyncio.get_event_loop()
-    parse_task = loop.run_in_executor(None, _execute_parse_resume, resume_text)
-    rank_task = loop.run_in_executor(None, rank_jobs, resume_text, 3)
-    
-    candidate, ranked = await asyncio.gather(parse_task, rank_task)
+    ranked = await loop.run_in_executor(None, rank_jobs, resume_text, 3)
     
     top_jobs_for_llm = [
-        {
-            "id": job["id"],
-            "title": job["title"],
-            "company": job["company"],
-            "skills": job["skills"],
-            "similarity_score": score,
-        }
-        for job, score in ranked
+        {"id": j["id"], "title": j["title"], "company": j["company"], "skills": j["skills"]}
+        for j, s in ranked
     ]
 
-    # 3. Explain
-    explanations_result = await loop.run_in_executor(None, _execute_explain_matches, candidate, top_jobs_for_llm)
-
-    # 4. Build response
-    explanation_map = {e["job_id"]: e for e in explanations_result.get("explanations", [])}
+    # 2. Unified Parse + Explain
+    result = await loop.run_in_executor(None, _execute_parse_and_explain, resume_text, top_jobs_for_llm)
+    
+    candidate = result.get("candidate", {})
+    explanation_map = {e["job_id"]: e for e in result.get("explanations", [])}
     
     ranked_jobs = []
     for job, score in ranked:
@@ -339,7 +323,7 @@ async def run_agent(resume_text: str) -> dict:
     return {
         "candidate": Candidate(**candidate),
         "ranked_jobs": ranked_jobs,
-        "clarifying_question": explanations_result.get("clarifying_question", "What's your ideal role?")
+        "clarifying_question": result.get("clarifying_question", "What's your ideal role?")
     }
 
 
@@ -382,15 +366,13 @@ async def refine(request: RefineRequest):
         enriched_resume = f"{request.resume_text}\nQ: {request.clarifying_question}\nA: {request.candidate_answer}"
         
         loop = asyncio.get_event_loop()
-        rank_task = loop.run_in_executor(None, rank_jobs, enriched_resume, 3)
-        parse_task = loop.run_in_executor(None, _execute_parse_resume, enriched_resume)
+        ranked = await loop.run_in_executor(None, rank_jobs, enriched_resume, 3)
         
-        ranked, candidate = await asyncio.gather(rank_task, parse_task)
+        top_jobs_for_llm = [{"id": j["id"], "title": j["title"], "company": j["company"]} for j, s in ranked]
         
-        top_jobs_for_llm = [{"id": j["id"], "title": j["title"], "similarity_score": s} for j, s in ranked]
-        
-        explanations_result = await loop.run_in_executor(None, _execute_explain_matches, candidate, top_jobs_for_llm)
-        explanation_map = {e["job_id"]: e for e in explanations_result.get("explanations", [])}
+        # Consolidated Parse + Explain
+        result = await loop.run_in_executor(None, _execute_parse_and_explain, enriched_resume, top_jobs_for_llm)
+        explanation_map = {e["job_id"]: e for e in result.get("explanations", [])}
 
         ranked_jobs = []
         for j, s in ranked:
@@ -408,13 +390,9 @@ async def refine(request: RefineRequest):
                 )
             )
 
-        reasoning_result = await loop.run_in_executor(
-            None, 
-            _generate_json,
-            f"Explain how answer '{request.candidate_answer}' changed recommendations for {request.resume_text[:100]}...",
-            "You are a career advisor. Return JSON with 'reasoning' (string)."
+        return RefineResponse(
+            ranked_jobs=ranked_jobs, 
+            reasoning=result.get("reasoning", "Updated based on feedback.")
         )
-
-        return RefineResponse(ranked_jobs=ranked_jobs, reasoning=reasoning_result.get("reasoning", "Updated based on feedback."))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
