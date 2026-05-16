@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional, Union
 
+import re
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -132,6 +133,39 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
+def _call_gemini_with_retry(func, *args, **kwargs):
+    """
+    Helper to call Gemini API with retries for 429 Resource Exhausted errors.
+    Parses 'retry in X seconds' from the error message.
+    """
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            # Check for 429 or Resource Exhausted
+            if "429" in err_str or "resource_exhausted" in err_str:
+                if i < max_retries - 1:
+                    # Default backoff
+                    wait_time = (i + 1) * 5
+                    
+                    # Try to extract precise wait time from error message
+                    # Example: "Please retry in 42.093158764s."
+                    match = re.search(r"retry in ([\d\.]+)", err_str)
+                    if match:
+                        try:
+                            wait_time = float(match.group(1)) + 1.0  # Add 1s buffer
+                        except ValueError:
+                            pass
+                    
+                    print(f"[Gemini] Rate limited. Retrying in {wait_time:.2f}s... (Attempt {i+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+            # Re-raise if not 429 or all retries failed
+            raise e
+
+
 # ── Embedding helpers ────────────────────────────────────────────────────────
 
 def _build_job_text(job: dict) -> str:
@@ -152,7 +186,8 @@ def _get_embeddings(texts: list[str]) -> np.ndarray:
     """Get embeddings for a list of texts using the selected provider."""
     if PROVIDER == "gemini":
         client = _get_gemini_client()
-        response = client.models.embed_content(
+        response = _call_gemini_with_retry(
+            client.models.embed_content,
             model=GEMINI_EMBEDDING_MODEL,
             contents=texts,
             config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
@@ -195,7 +230,8 @@ def _generate_json(prompt: str, system_instruction: str = "") -> dict:
     """Generate structured JSON from LLM regardless of provider."""
     if PROVIDER == "gemini":
         client = _get_gemini_client()
-        response = client.models.generate_content(
+        response = _call_gemini_with_retry(
+            client.models.generate_content,
             model=GEMINI_CHAT_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -251,6 +287,7 @@ def run_agent(resume_text: str) -> dict:
     candidate = _execute_parse_resume(resume_text)
     
     # 2. Rank
+    time.sleep(1)  # Throttle
     ranked = rank_jobs(resume_text, top_k=5)
     top_jobs_for_llm = [
         {
@@ -264,6 +301,7 @@ def run_agent(resume_text: str) -> dict:
     ]
 
     # 3. Explain
+    time.sleep(1)  # Throttle
     explanations_result = _execute_explain_matches(candidate, top_jobs_for_llm)
 
     # 4. Build response
@@ -329,10 +367,16 @@ def recommend(request: RecommendRequest):
 def refine(request: RefineRequest):
     try:
         enriched_resume = f"{request.resume_text}\nQ: {request.clarifying_question}\nA: {request.candidate_answer}"
+        
+        time.sleep(0.5)
         ranked = rank_jobs(enriched_resume, top_k=5)
+        
+        time.sleep(0.5)
         candidate = _execute_parse_resume(enriched_resume)
         
         top_jobs_for_llm = [{"id": j["id"], "title": j["title"], "similarity_score": s} for j, s in ranked]
+        
+        time.sleep(0.5)
         explanations_result = _execute_explain_matches(candidate, top_jobs_for_llm)
         explanation_map = {e["job_id"]: e for e in explanations_result.get("explanations", [])}
 
@@ -352,6 +396,7 @@ def refine(request: RefineRequest):
                 )
             )
 
+        time.sleep(0.5)
         reasoning = _generate_json(
             f"Explain how answer '{request.candidate_answer}' changed recommendations for {request.resume_text[:200]}...",
             "You are a career advisor. Return JSON with 'reasoning' (string)."
