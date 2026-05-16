@@ -32,7 +32,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # Default models
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-flash-latest")
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-1.5-flash")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 
 # Determine provider
@@ -139,7 +139,7 @@ def _call_gemini_with_retry(func, *args, **kwargs):
     Helper to call Gemini API with retries for 429 Resource Exhausted errors.
     Parses 'retry in X seconds' from the error message.
     """
-    max_retries = 3
+    max_retries = 5  # Increased retries
     for i in range(max_retries):
         try:
             return func(*args, **kwargs)
@@ -148,15 +148,14 @@ def _call_gemini_with_retry(func, *args, **kwargs):
             # Check for 429 or Resource Exhausted
             if "429" in err_str or "resource_exhausted" in err_str:
                 if i < max_retries - 1:
-                    # Default backoff
-                    wait_time = (i + 1) * 5
+                    # Default backoff: 5, 10, 15, 20...
+                    wait_time = (i + 1) * 10 
                     
                     # Try to extract precise wait time from error message
-                    # Example: "Please retry in 42.093158764s."
                     match = re.search(r"retry in ([\d\.]+)", err_str)
                     if match:
                         try:
-                            wait_time = float(match.group(1)) + 1.0  # Add 1s buffer
+                            wait_time = float(match.group(1)) + 2.0  # Add 2s buffer
                         except ValueError:
                             pass
                     
