@@ -3,7 +3,7 @@ UI template for the Smart Job Match Agent.
 Minimal, professional design — no framework dependencies.
 """
 
-HTML_TEMPLATE = \"\"\"<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -643,7 +643,7 @@ function esc(str) {
 
 function renderCandidate(c) {
   const skills = (c.skills || []).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
-  document.getElementById('candidate-card').innerHTML = \\`
+  document.getElementById('candidate-card').innerHTML = `
     <h3>${esc(c.name)}</h3>
     <div class="candidate-grid">
       <div class="candidate-field"><label>Experience</label><span>${c.experience_years} years</span></div>
@@ -651,21 +651,21 @@ function renderCandidate(c) {
       <div class="candidate-field"><label>Preferred roles</label><span>${esc((c.preferred_roles || []).join(', ')) || '—'}</span></div>
       <div class="candidate-field" style="grid-column: 1 / -1;"><label>Skills</label><div class="skills-list">${skills}</div></div>
     </div>
-  \\`;
+  `;
   document.getElementById('candidate-section').style.display = 'block';
 }
 
 function renderJobs(jobs) {
   document.getElementById('job-list').innerHTML = jobs.map(j => {
     const matchClass = (j.match_level || '').toLowerCase().includes('strong') ? 'level-strong' : (j.match_level || '').toLowerCase().includes('moderate') ? 'level-moderate' : 'level-stretch';
-    return \\`
+    return `
       <div class="job-card">
         <div class="job-header">
           <div><div class="job-title">${esc(j.title)}</div><div class="job-company">${esc(j.company)}</div></div>
           <span class="job-score ${scoreClass(j.similarity_score)}">${j.similarity_score.toFixed(4)}</span>
         </div>
         <div class="job-meta"><span>${esc(j.location)} · ${j.remote?'Remote':'On-site'}</span><span>${esc(j.domain)}</span><span>${j.required_experience_years}yr+ exp</span><span>₹${j.salary_lpa} LPA</span></div>
-        <div class="job-skills">${(j.skills || []).map(s => \\`<span class="skill-tag">${esc(s)}</span>\\`).join('')}</div>
+        <div class="job-skills">${(j.skills || []).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('')}</div>
         <div class="job-explanation">${esc(j.explanation)}</div>
         <div class="job-analysis">
           <div class="analysis-header">
@@ -673,24 +673,24 @@ function renderJobs(jobs) {
             <span class="readiness-badge ${matchClass}">${esc(j.match_level)}</span>
           </div>
           <div class="analysis-grid">
-            <div class="analysis-col"><h5>Skill Gaps</h5><ul class="analysis-list">${(j.skill_gaps||[]).length>0 ? j.skill_gaps.map(s=>\\`<li>${esc(s)}</li>\\`).join('') : '<li>No major gaps</li>'}</ul></div>
-            <div class="analysis-col"><h5>Suggested Prep</h5><ul class="analysis-list">${(j.suggested_preparation||[]).map(s=>\\`<li>${esc(s)}</li>\\`).join('')}</ul></div>
+            <div class="analysis-col"><h5>Skill Gaps</h5><ul class="analysis-list">${(j.skill_gaps||[]).length>0 ? j.skill_gaps.map(s=>`<li>${esc(s)}</li>`).join('') : '<li>No major gaps</li>'}</ul></div>
+            <div class="analysis-col"><h5>Suggested Prep</h5><ul class="analysis-list">${(j.suggested_preparation||[]).map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>
           </div>
         </div>
       </div>
-    \\`;
+    `;
   }).join('');
   document.getElementById('jobs-section').style.display = 'block';
 }
 
 function renderClarify(question) {
   lastClarifyingQuestion = question;
-  document.getElementById('clarify-section').innerHTML = \\`
+  document.getElementById('clarify-section').innerHTML = `
     <div class="clarify-section">
       <h4>Clarifying question</h4><p>${esc(question)}</p>
       <div class="input-row"><input type="text" id="clarify-input" placeholder="Type your answer to refine results..." /><button class="btn btn-primary" onclick="submitRefine()">Refine</button></div>
     </div>
-  \\`;
+  `;
   document.getElementById('clarify-section').style.display = 'block';
 }
 
@@ -711,10 +711,10 @@ async function submitResume() {
     const timeoutId = setTimeout(() => controller.abort(), 28000);
     const res = await fetch('/recommend', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resume_text: text }), signal: controller.signal });
     clearTimeout(timeoutId);
-    if (!res.ok) { const err = await res.json().catch(()=>({detail:'Request failed'})); throw new Error(err.detail || \\`HTTP \\${res.status}\\`); }
+    if (!res.ok) { const err = await res.json().catch(()=>({detail:'Request failed'})); throw new Error(err.detail || `HTTP ${res.status}`); }
     const data = await res.json();
     allStepsDone();
-    statusBar.textContent = \\`Success — \\${data.ranked_jobs.length} jobs matched\\`;
+    statusBar.textContent = `Success — ${data.ranked_jobs.length} jobs matched`;
     renderCandidate(data.candidate);
     renderJobs(data.ranked_jobs);
     if (data.clarifying_question) renderClarify(data.clarifying_question);
@@ -746,4 +746,4 @@ async function submitRefine() {
 }
 </script>
 </body>
-</html>\"\"\"
+</html>"""
